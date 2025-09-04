@@ -1,5 +1,4 @@
 import { createAgent, gemini } from "@inngest/agent-kit";
-
 const analyzeTicket = async (ticket) => {
   const supportAgent = createAgent({
     model: gemini({
@@ -9,56 +8,54 @@ const analyzeTicket = async (ticket) => {
     name: "AI Ticket Triage Assistant",
     system: `You are an expert AI assistant that processes technical support tickets. 
 
-Your job is to:
+Your job:
 1. Summarize the issue.
 2. Estimate its priority.
-3. Provide helpful notes and resource links for human moderators.
-4. List relevant technical skills required.
+3. Provide helpful notes for moderators.
+4. List relevant skills.
 
 IMPORTANT:
-- Respond with *only* valid raw JSON.
-- Do NOT include markdown, code fences, comments, or any extra formatting.
-- The format must be a raw JSON object.
-
-Repeat: Do not wrap your output in markdown or code fences.`,
+Respond with only valid raw JSON, no markdown or code fences.`,
   });
 
   const response =
-    await supportAgent.run(`You are a ticket triage agent. Only return a strict JSON object with no extra text, headers, or markdown.
-        
-Analyze the following support ticket and provide a JSON object with:
+    await supportAgent.run(`Analyze the following ticket and return ONLY valid JSON:
 
-- summary: A short 1-2 sentence summary of the issue.
-- priority: One of "low", "medium", or "high".
-- helpfulNotes: A detailed technical explanation that a moderator can use to solve this issue. Include useful external links or resources if possible.
-- relatedSkills: An array of relevant skills required to solve the issue (e.g., ["React", "MongoDB"]).
+- title: ${ticket.title}
+- description: ${ticket.description}
 
-Respond ONLY in this JSON format and do not include any other text or markdown in the answer:
-
+Required fields:
 {
-"summary": "Short summary of the ticket",
-"priority": "high",
-"helpfulNotes": "Here are useful tips...",
-"relatedSkills": ["React", "Node.js"]
-}
+  "summary": "short summary",
+  "priority": "low|medium|high",
+  "helpfulNotes": "detailed notes",
+  "relatedSkills": ["skill1","skill2"]
+}`);
 
----
-
-Ticket information:
-
-- Title: ${ticket.title}
-- Description: ${ticket.description}`);
-
-  const raw = response.output[0].context;
+  // Safely extract raw text
+  const raw = response.output[0]?.context || "{}";
+  let parsed = {};
 
   try {
+    // Try to parse JSON even if wrapped in ```json
     const match = raw.match(/```json\s*([\s\S]*?)\s*```/i);
     const jsonString = match ? match[1] : raw.trim();
-    return JSON.parse(jsonString);
+    parsed = JSON.parse(jsonString);
   } catch (e) {
-    console.log("Failed to parse JSON from AI response" + e.message);
-    return null; // watch out for this
+    console.log("Failed to parse JSON from AI response:", e.message);
   }
+
+  // Return safe object
+  return {
+    summary: parsed.summary || ticket.title,
+    priority: ["low", "medium", "high"].includes(parsed.priority)
+      ? parsed.priority
+      : "medium",
+    helpfulNotes: parsed.helpfulNotes || "No helpful notes provided",
+    relatedSkills: Array.isArray(parsed.relatedSkills)
+      ? parsed.relatedSkills
+      : [],
+  };
 };
 
 export default analyzeTicket;

@@ -8,4 +8,5 @@ router.get("/", authenticate, getTickets);
 router.get("/:id", authenticate, getTicket);
 router.post("/", authenticate, createTicket);
 
+// export default router;
 export default router;

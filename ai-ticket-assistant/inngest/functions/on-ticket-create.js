@@ -1,4 +1,5 @@
 import { inngest } from "../client.js";
+import mongoose from "mongoose";
 import Ticket from "../../models/ticket.js";
 import User from "../../models/user.js";
 import { NonRetriableError } from "inngest";
@@ -12,72 +13,101 @@ export const onTicketCreated = inngest.createFunction(
     try {
       const { ticketId } = event.data;
 
-      //fetch ticket from DB
+      // 0️⃣ Ensure MongoDB is connected
+      if (mongoose.connection.readyState === 0) {
+        await mongoose.connect(process.env.MONGO_URI, {
+          useNewUrlParser: true,
+          useUnifiedTopology: true,
+        });
+        console.log("MongoDB connected inside Inngest function");
+      }
+
+      // 1️⃣ Fetch the ticket
       const ticket = await step.run("fetch-ticket", async () => {
-        const ticketObject = await Ticket.findById(ticketId);
-        if (!ticket) {
-          throw new NonRetriableError("Ticket not found");
-        }
-        return ticketObject;
+        const t = await Ticket.findById(ticketId);
+        if (!t) throw new NonRetriableError("Ticket not found");
+        return t;
       });
+      console.log("Ticket fetched:", ticket);
 
+      // 2️⃣ Initialize ticket status
       await step.run("update-ticket-status", async () => {
-        await Ticket.findByIdAndUpdate(ticket._id, { status: "TODO" });
+        const updated = await Ticket.findByIdAndUpdate(
+          ticket._id,
+          { status: "TODO" },
+          { new: true }
+        );
+        if (!updated) throw new NonRetriableError("Failed to initialize ticket status");
+        console.log("Ticket status initialized to TODO");
       });
 
-      const aiResponse = await analyzeTicket(ticket);
+      // 3️⃣ Run AI analysis on the ticket
+      let aiResponse;
+      try {
+        aiResponse = await analyzeTicket(ticket);
+        console.log("AI Response:", aiResponse);
+      } catch (err) {
+        console.error("AI analysis failed, using defaults:", err);
+        aiResponse = { priority: "medium", helpfulNotes: "", relatedSkills: [] };
+      }
 
-      const relatedskills = await step.run("ai-processing", async () => {
-        let skills = [];
-        if (aiResponse) {
-          await Ticket.findByIdAndUpdate(ticket._id, {
-            priority: !["low", "medium", "high"].includes(aiResponse.priority)
-              ? "medium"
-              : aiResponse.priority,
-            helpfulNotes: aiResponse.helpfulNotes,
+      // 4️⃣ Update ticket with AI analysis
+      const relatedSkills = await step.run("ai-processing", async () => {
+        const updatedTicket = await Ticket.findByIdAndUpdate(
+          ticket._id,
+          {
+            priority: ["low", "medium", "high"].includes(aiResponse.priority)
+              ? aiResponse.priority
+              : "medium",
+            helpfulNotes: aiResponse.helpfulNotes || "",
             status: "IN_PROGRESS",
-            relatedSkills: aiResponse.relatedSkills,
-          });
-          skills = aiResponse.relatedSkills;
-        }
-        return skills;
+            relatedSkills: aiResponse.relatedSkills || [],
+          },
+          { new: true }
+        );
+        if (!updatedTicket) throw new NonRetriableError("Failed to update ticket with AI info");
+        console.log("Ticket updated with AI info:", updatedTicket);
+        return updatedTicket.relatedSkills || [];
       });
 
+      // 5️⃣ Assign a moderator/admin
       const moderator = await step.run("assign-moderator", async () => {
         let user = await User.findOne({
           role: "moderator",
-          skills: {
-            $elemMatch: {
-              $regex: relatedskills.join("|"),
-              $options: "i",
-            },
-          },
+          skills: { $in: relatedSkills },
         });
+
         if (!user) {
-          user = await User.findOne({
-            role: "admin",
-          });
+          user = await User.findOne({ role: "admin" });
         }
-        await Ticket.findByIdAndUpdate(ticket._id, {
-          assignedTo: user?._id || null,
-        });
+
+        const updatedTicket = await Ticket.findByIdAndUpdate(
+          ticket._id,
+          { assignedTo: user?._id || null },
+          { new: true }
+        );
+        if (!updatedTicket) throw new NonRetriableError("Failed to assign moderator");
+
+        console.log("Moderator assigned:", user?.email || "No moderator found");
         return user;
       });
 
-      await setp.run("send-email-notification", async () => {
+      // 6️⃣ Send email notification
+      await step.run("send-email-notification", async () => {
         if (moderator) {
           const finalTicket = await Ticket.findById(ticket._id);
           await sendMail(
             moderator.email,
             "Ticket Assigned",
-            `A new ticket is assigned to you ${finalTicket.title}`
+            `A new ticket is assigned to you: ${finalTicket.title}`
           );
+          console.log(`Email sent to ${moderator.email}`);
         }
       });
 
       return { success: true };
     } catch (err) {
-      console.error("❌ Error running the step", err.message);
+      console.error("❌ Error in on-ticket-created function:", err);
       return { success: false };
     }
   }
